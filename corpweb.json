@@ -1,0 +1,260 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Corpweb: 2 Amazon Linux 2023 web servers behind an ALB",
+  "Parameters": {
+    "InstanceType": {
+      "Description": "Server instance type",
+      "Type": "String",
+      "Default": "t3.micro",
+      "AllowedValues": ["t3.micro", "t3.small"],
+      "ConstraintDescription": "Must be t3.micro or t3.small."
+    },
+    "KeyPair": {
+      "Description": "Name of your EC2 key pair to enable SSH access",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "ConstraintDescription": "Must be the name of an existing key pair."
+    },
+    "YourIp": {
+      "Description": "Your workstation public IP in CIDR notation (x.x.x.x/32)",
+      "Type": "String"
+    },
+    "LatestAmiId": {
+      "Description": "Amazon Linux 2023 AMI (resolved from SSM)",
+      "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+      "Default": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+    }
+  },
+  "Resources": {
+    "EngineeringVpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "EnableDnsSupport": "true",
+        "EnableDnsHostnames": "true",
+        "CidrBlock": "10.0.0.0/18",
+        "Tags": [{ "Key": "Name", "Value": "EngineeringVpc" }]
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {}
+    },
+    "VPCGatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "InternetGatewayId": { "Ref": "InternetGateway" },
+        "VpcId": { "Ref": "EngineeringVpc" }
+      }
+    },
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "EngineeringVpc" }
+      }
+    },
+    "PublicRoute": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "VPCGatewayAttachment",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "RouteTableId": { "Ref": "PublicRouteTable" },
+        "GatewayId": { "Ref": "InternetGateway" }
+      }
+    },
+    "PublicSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": { "Ref": "EngineeringVpc" },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock": "10.0.0.0/24",
+        "AvailabilityZone": {
+          "Fn::Select": ["0", { "Fn::GetAZs": { "Ref": "AWS::Region" } }]
+        },
+        "Tags": [{ "Key": "Name", "Value": "PublicSubnet1" }]
+      }
+    },
+    "PublicSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": { "Ref": "EngineeringVpc" },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock": "10.0.1.0/24",
+        "AvailabilityZone": {
+          "Fn::Select": ["1", { "Fn::GetAZs": { "Ref": "AWS::Region" } }]
+        },
+        "Tags": [{ "Key": "Name", "Value": "PublicSubnet2" }]
+      }
+    },
+    "PublicSubnet1RTassoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": { "Ref": "PublicRouteTable" },
+        "SubnetId": { "Ref": "PublicSubnet1" }
+      }
+    },
+    "PublicSubnet2RTassoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": { "Ref": "PublicRouteTable" },
+        "SubnetId": { "Ref": "PublicSubnet2" }
+      }
+    },
+    "WebserversSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupName": "WebserversSG",
+        "VpcId": { "Ref": "EngineeringVpc" },
+        "GroupDescription": "Allow SSH from my IP and HTTP from anywhere",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "80",
+            "ToPort": "80",
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "22",
+            "ToPort": "22",
+            "CidrIp": { "Ref": "YourIp" }
+          }
+        ]
+      }
+    },
+    "WebserverRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Service": ["ec2.amazonaws.com"] },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+        ]
+      }
+    },
+    "WebserverInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [{ "Ref": "WebserverRole" }]
+      }
+    },
+    "web1": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": "PublicRoute",
+      "Properties": {
+        "KeyName": { "Ref": "KeyPair" },
+        "InstanceType": { "Ref": "InstanceType" },
+        "ImageId": { "Ref": "LatestAmiId" },
+        "SubnetId": { "Ref": "PublicSubnet1" },
+        "IamInstanceProfile": { "Ref": "WebserverInstanceProfile" },
+        "SecurityGroupIds": [{ "Ref": "WebserversSG" }],
+        "Tags": [{ "Key": "Name", "Value": "web1" }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "dnf update -y\n",
+                "dnf install -y git httpd php\n",
+                "service httpd start\n",
+                "chkconfig httpd on\n",
+                "aws s3 cp s3://seis665-public/index.php /var/www/html/\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "web2": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": "PublicRoute",
+      "Properties": {
+        "KeyName": { "Ref": "KeyPair" },
+        "InstanceType": { "Ref": "InstanceType" },
+        "ImageId": { "Ref": "LatestAmiId" },
+        "SubnetId": { "Ref": "PublicSubnet2" },
+        "IamInstanceProfile": { "Ref": "WebserverInstanceProfile" },
+        "SecurityGroupIds": [{ "Ref": "WebserversSG" }],
+        "Tags": [{ "Key": "Name", "Value": "web2" }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "dnf update -y\n",
+                "dnf install -y git httpd php\n",
+                "service httpd start\n",
+                "chkconfig httpd on\n",
+                "aws s3 cp s3://seis665-public/index.php /var/www/html/\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "EngineeringWebservers": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": "EngineeringWebservers",
+        "VpcId": { "Ref": "EngineeringVpc" },
+        "Protocol": "HTTP",
+        "Port": 80,
+        "TargetType": "instance",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckPort": "80",
+        "HealthCheckPath": "/",
+        "Targets": [
+          { "Id": { "Ref": "web1" }, "Port": 80 },
+          { "Id": { "Ref": "web2" }, "Port": 80 }
+        ]
+      }
+    },
+    "EngineeringLB": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "DependsOn": "PublicRoute",
+      "Properties": {
+        "Name": "EngineeringLB",
+        "Type": "application",
+        "Scheme": "internet-facing",
+        "Subnets": [
+          { "Ref": "PublicSubnet1" },
+          { "Ref": "PublicSubnet2" }
+        ],
+        "SecurityGroups": [{ "Ref": "WebserversSG" }]
+      }
+    },
+    "LBListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": { "Ref": "EngineeringLB" },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": { "Ref": "EngineeringWebservers" }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "WebUrl": {
+      "Description": "Load balancer DNS name",
+      "Value": {
+        "Fn::Join": [
+          "",
+          ["http://", { "Fn::GetAtt": ["EngineeringLB", "DNSName"] }]
+        ]
+      }
+    }
+  }
+}
